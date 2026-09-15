@@ -6,7 +6,7 @@ from wandb_train import main
 # 序列文件由 LPKTDataset 加载，额外提供 itseqs/utseqs 时间索引。
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_name", type=str, default="algebra2005")
+    parser.add_argument("--dataset_name", type=str, default="assist2015")
     parser.add_argument("--model_name", type=str, default="akt_lpkt")
     parser.add_argument("--emb_type", type=str, default="qid")
     parser.add_argument("--save_dir", type=str, default="saved_model")

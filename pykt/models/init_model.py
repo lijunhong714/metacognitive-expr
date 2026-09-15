@@ -97,10 +97,15 @@ def init_model(model_name, model_config, data_config, emb_type):
         # akt_lpkt: AKT trunk + LPKT recurrent regulator, the construction method is consistent with LPKT, requiring the q_matrix question-concept association matrix
         qmatrix_path = os.path.join(data_config["dpath"], "qmatrix.npz")
         if os.path.exists(qmatrix_path):
-            q_matrix = np.load(qmatrix_path, allow_pickle=True)['matrix']
+            q_matrix = torch.tensor(np.load(qmatrix_path, allow_pickle=True)['matrix']).float().to(device)
+        elif data_config["num_q"] > 0:
+            q_matrix = torch.tensor(generate_qmatrix(data_config)).float().to(device)
         else:
-            q_matrix = generate_qmatrix(data_config)
-        q_matrix = torch.tensor(q_matrix).float().to(device)
+            # concept-only dataset (num_q == 0, e.g. assist2015): no question ids exist, so the
+            # question-concept matrix is undefined. The model degrades to a concept-level lookup
+            # and builds its own identity q_matrix (see AKTLPKT.__init__)
+            print(f"model: {model_name} runs on a concept-only dataset (num_q=0), use a concept-level q_matrix")
+            q_matrix = None
         # n_phi: number of process features (answer duration / hint count / etc.), 0 means the dataset has no process features, forward passes phi=None
         n_phi = model_config.get("n_phi", 0)
         # n_phi is already passed explicitly, prevent duplicate keyword conflicts when expanding with **

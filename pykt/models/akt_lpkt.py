@@ -255,6 +255,9 @@ class RecurrentRegulator(nn.Module):
         """q_rows: (B,T,n_c+1) 已由父模块按 q_matrix 查表展开的题目-概念指示矩阵。"""
         bs, seqlen, _ = inter_emb.shape
         nq = self.n_concept + 1
+        if pid_diff is None:
+            # 概念级数据集（num_q == 0）没有题目难度嵌入，难度项置零
+            pid_diff = inter_emb.new_zeros(bs, seqlen, 1)
 
         it_emb = self.it_embed(it_idx)
         at_emb = self.at_embed(at_idx) * torch.sigmoid(self.at_scale).view(1, 1, 1)
@@ -415,6 +418,10 @@ class AKTLPKT(nn.Module):
         at_idx = atseqs.clamp(min=0, max=self.n_at)
 
         # 通路 B 先跑：得到逐步的证据权重（因果，无循环依赖）
+        # 概念级数据集（num_q == 0，如 assist2015）没有题目 id，cq 为空，退化用概念 id 充当题目索引。
+        # 仅在模型本身没有题目维度时生效，有题目 id 的数据集一律走原路径
+        if self.n_pid == 0 and (qids is None or qids.size(1) == 0):
+            qids = cids
         q_rows = self.regulator.q_matrix[qids]                          # (B,T,n_c+1)
         q_rows = q_rows * mask.unsqueeze(-1).float()
         omega, pi, h_read = self.regulator(qa_embed_data, q_rows, it_idx, at_idx,
