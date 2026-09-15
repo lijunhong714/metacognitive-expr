@@ -26,7 +26,8 @@ def main(params):
     with open("../configs/wandb.json") as fin,\
         open(launch_file,"w") as fallsh:
         wandb_config = json.load(fin)
-        pre = "WANDB_API_KEY=" + wandb_config["api_key"] + " wandb sweep "
+        api_key = os.environ.get("WANDB_API_KEY") or wandb_config.get("api_key", "")
+        pre = "WANDB_API_KEY=" + api_key + " wandb sweep "
         for dataset_name in dataset_names.split(","):
             files = os.listdir(src_dir)
             

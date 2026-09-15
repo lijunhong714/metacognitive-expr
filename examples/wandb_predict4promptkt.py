@@ -19,7 +19,8 @@ def main(params, args):
     if params["use_wandb"] == 1:
         import wandb
 
-        os.environ["WANDB_API_KEY"] = wandb_config["api_key"]
+        if not os.environ.get("WANDB_API_KEY"):
+            os.environ["WANDB_API_KEY"] = wandb_config.get("api_key", "")
         wandb.init(project="wandb_predict")
 
     save_dir, batch_size, fusion_type = (

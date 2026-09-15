@@ -18,7 +18,8 @@ with open("../configs/wandb.json") as fin:
     wandb_config = json.load(fin)
 
 uid = wandb_config["uid"]
-os.environ['WANDB_API_KEY'] = wandb_config["api_key"]
+if not os.environ.get("WANDB_API_KEY"):
+    os.environ['WANDB_API_KEY'] = wandb_config.get("api_key", "")
 CONFIG_FILE = "../configs/best_model.json"
 
 def str2bool(str):
@@ -199,7 +200,8 @@ def generate_wandb(fpath, ftarget, model_path):
 def generate_sweep(wandb_config, pred_dir, sweep_shell, ftarget, generate_all):
     # with open(wandb_path) as fin:
     #     wandb_config = json.load(fin)
-    pre = "WANDB_API_KEY=" + wandb_config["api_key"] + " wandb sweep "
+    api_key = os.environ.get("WANDB_API_KEY") or wandb_config.get("api_key", "")
+    pre = "WANDB_API_KEY=" + api_key + " wandb sweep "
     with open(sweep_shell,"w") as fallsh:
         if generate_all:
             files = os.listdir(pred_dir)
