@@ -64,3 +64,11 @@ examples/nips2022-peiyou/
 examples/nips2022-ednet/
 examples/models/
 examples/seedwandb/wandb/
+
+# 防误提交：原始数据压缩包（data/ 下个别数据集不在上面的名单里，且单个 zip 可达数百 MB，
+# GitHub 硬性拒绝 >100MB 的文件，误提交会直接导致 push 失败）
+data/*.zip
+# Windows 系统垃圾文件（曾莫名出现在 pykt/models/ 下）
+*.winmd
+# 本地实验产物
+实验结果.xlsx
