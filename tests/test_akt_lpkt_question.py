@@ -50,6 +50,7 @@ def run_case(k, has_duration):
             input_level="question",
         ).to(device)
         assert model.regulator.q_matrix is None
+        assert model.qa_embed_diff.num_embeddings == 2
         mask = r.ne(-1)
         model.eval()
         with torch.no_grad():

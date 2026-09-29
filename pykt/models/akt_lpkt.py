@@ -394,7 +394,10 @@ class AKTLPKT(nn.Module):
             self.difficult_param = nn.Embedding(n_pid + 1, 1)
             diff_count = n_pid if input_level == "question" else n_question
             self.q_embed_diff = nn.Embedding(diff_count + 1, d_model)
-            self.qa_embed_diff = nn.Embedding(2 * diff_count + 1, d_model)
+            # In question mode forward indexes this table only with response 0/1.
+            # Keeping 2*num_q unused rows would inflate Algebra/Bridge checkpoints.
+            qa_diff_count = 2 if input_level == "question" else 2 * diff_count + 1
+            self.qa_embed_diff = nn.Embedding(qa_diff_count, d_model)
 
         self.akt = AKTArchitecture(n_blocks, d_model, d_ff, num_attn_heads,
                                    dropout, kq_same == 1)
