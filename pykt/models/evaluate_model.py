@@ -143,16 +143,17 @@ def evaluate(model, test_loader, model_name, rel=None, save_path=""):
                 y = y[:,1:]
                 c,cshft = q,qshft#question level 
             elif model_name == "akt_lpkt":
-                # akt_lpkt: additionally needs the it/at time index provided by LPKTDataset, concept-level output (consistent with AKT)
+                # AKT_LPKT only: cc [B,T,K] and y[:,1:] [B,T-1], one prediction per question.
                 cit = torch.cat((dcur["itseqs"][:,0:1], dcur["shft_itseqs"]), dim=1).to(device)
                 if isinstance(dcur["utseqs"], torch.Tensor) and dcur["utseqs"].numel() > 0:
                     cat = torch.cat((dcur["utseqs"][:,0:1], dcur["shft_utseqs"]), dim=1).to(device)
                 else:
-                    cat = torch.zeros_like(cit) # dataset has no usetimes -> all 0 indices
-                # interaction validity mask (B,T), consistent with the training side model_forward
-                cmask = torch.cat((m[:, 0:1], m), dim=1)
-                y, reg_loss = model(cc.long(), cr.long(), cq.long(), cit.long(), cat.long(), None, cmask)
+                    cat = None
+                cmask = cr.ne(-1)
+                y, reg_loss = model(cc.long(), cr.long(), cq.long(), cit.long(),
+                                    None if cat is None else cat.long(), None, cmask)
                 y = y[:,1:]
+                c,cshft = q,qshft  # Saved records and metrics use question IDs.
             elif model_name == "hawkes":
                 ct = torch.cat((dcur["tseqs"][:,0:1], dcur["shft_tseqs"]), dim=1)
                 # csm = torch.cat((dcur["smasks"][:,0:1], dcur["smasks"]), dim=1)

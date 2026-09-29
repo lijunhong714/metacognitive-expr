@@ -209,22 +209,6 @@ def save_dcur(row, effective_keys):
     return dcur
 
 
-def build_selectmasks(dcur, lo, hi, pad_dim, pad_val):
-    """Build the selectmasks string for positions [lo, hi) followed by pad_dim padding entries.
-
-    extend_multi_concepts expands one interaction carrying several knowledge concepts into
-    several consecutive rows repeating the same question/response/timestamp, marking every
-    row but the first is_repeat=1. Such a row's response is identical to the previous row's,
-    so selecting it as a prediction target lets the model copy an input token instead of
-    predicting it. Those rows stay in the sequence as history but are not selected.
-    """
-    rep = dcur.get("is_repeat")
-    flags = [str(rep[t]) == "1" for t in range(lo, hi)] if rep is not None \
-        else [False] * (hi - lo)
-    return ",".join(["1" if not f else str(pad_val) for f in flags]
-                    + [str(pad_val)] * pad_dim)
-
-
 def generate_sequences(df, effective_keys, min_seq_len=3, maxlen=200, pad_val=-1):
     save_keys = list(effective_keys) + ["selectmasks"]
     dres = {"selectmasks": []}
@@ -243,8 +227,7 @@ def generate_sequences(df, effective_keys, min_seq_len=3, maxlen=200, pad_val=-1
                     dres[key].append(",".join(dcur[key][j: j + maxlen]))
                 else:
                     dres[key].append(dcur[key])
-            dres["selectmasks"].append(
-                build_selectmasks(dcur, j, j + maxlen, 0, pad_val))
+            dres["selectmasks"].append(",".join(["1"] * maxlen))
 
             j += maxlen
         if rest < min_seq_len:  # delete sequence len less than min_seq_len
@@ -261,7 +244,7 @@ def generate_sequences(df, effective_keys, min_seq_len=3, maxlen=200, pad_val=-1
             else:
                 dres[key].append(dcur[key])
         dres["selectmasks"].append(
-            build_selectmasks(dcur, j, lenrs, pad_dim, pad_val))
+            ",".join(["1"] * rest + [str(pad_val)] * pad_dim))
 
     # after preprocess data, report
     dfinal = dict()
@@ -287,11 +270,8 @@ def generate_window_sequences(df, effective_keys, maxlen=200, pad_val=-1):
                     dres[key].append(",".join(dcur[key][0: maxlen]))
                 else:
                     dres[key].append(dcur[key])
-            dres["selectmasks"].append(build_selectmasks(dcur, 0, maxlen, 0, pad_val))
+            dres["selectmasks"].append(",".join(["1"] * maxlen))
             for j in range(maxlen+1, lenrs+1):
-                if "is_repeat" in dcur and str(dcur["is_repeat"][j - 1]) == "1":
-                    # position j-1 duplicates j-2, so its response is already in the input
-                    continue
                 for key in effective_keys:
                     dres.setdefault(key, [])
                     if key not in ONE_KEYS:
@@ -312,7 +292,7 @@ def generate_window_sequences(df, effective_keys, maxlen=200, pad_val=-1):
                 else:
                     dres[key].append(dcur[key])
             dres["selectmasks"].append(
-                build_selectmasks(dcur, 0, lenrs, pad_dim, pad_val))
+                ",".join(["1"] * lenrs + [str(pad_val)] * pad_dim))
 
     dfinal = dict()
     for key in ALL_KEYS:

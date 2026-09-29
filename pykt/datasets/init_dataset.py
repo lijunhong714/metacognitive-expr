@@ -9,6 +9,7 @@ from .atdkt_dataloader import ATDKTDataset
 from .lpkt_dataloader import LPKTDataset
 from .lpkt_utils import generate_time2idx
 from .que_data_loader import KTQueDataset
+from .akt_lpkt_que_dataloader import AKTLPKTQueDataset
 from pykt.config import que_type_models
 from .dimkt_dataloader import DIMKTDataset
 from .que_data_loader_promptkt import KTQueDataset_promptKT
@@ -35,11 +36,11 @@ def init_test_datasets(data_config, model_name, batch_size, diff_level=None, arg
         test_question_dataset = None
         test_question_window_dataset= None
     elif model_name in ["akt_lpkt"]:
-        # akt_lpkt is a concept-level model (consistent with AKT), the test set uses concept-level sequence files,
-        # while needing the itseqs (interval time index) / utseqs (answer duration index) provided by LPKTDataset
+        # AKT_LPKT alone reads question-level files: cseqs [N,T,K], one response per question.
+        # Its cache is separate from the native LPKT and question loaders.
         at2idx, it2idx = generate_time2idx(data_config)
-        test_dataset = LPKTDataset(os.path.join(data_config["dpath"], data_config["test_file"]), at2idx, it2idx, data_config["input_type"], {-1})
-        test_window_dataset = LPKTDataset(os.path.join(data_config["dpath"], data_config["test_window_file"]), at2idx, it2idx, data_config["input_type"], {-1})
+        test_dataset = AKTLPKTQueDataset(os.path.join(data_config["dpath"], data_config["test_file_quelevel"]), {-1}, data_config["max_concepts"], at2idx, it2idx)
+        test_window_dataset = AKTLPKTQueDataset(os.path.join(data_config["dpath"], data_config["test_window_file_quelevel"]), {-1}, data_config["max_concepts"], at2idx, it2idx)
         test_question_dataset = None
         test_question_window_dataset= None
     elif model_name in ["rkt"] and dataset_name in ["statics2011", "assist2015", "poj"]:
@@ -163,11 +164,10 @@ def init_dataset4train(dataset_name, model_name, data_config, i, batch_size, dif
         curvalid = LPKTDataset(os.path.join(data_config["dpath"], data_config["train_valid_file_quelevel"]), at2idx, it2idx, data_config["input_type"], {i})
         curtrain = LPKTDataset(os.path.join(data_config["dpath"], data_config["train_valid_file_quelevel"]), at2idx, it2idx, data_config["input_type"], all_folds - {i})
     elif model_name == "akt_lpkt":
-        # akt_lpkt training uses concept-level sequence files (consistent with AKT),
-        # LPKTDataset additionally provides the itseqs/utseqs time indexes required by the recurrent regulator
+        # The hybrid has its own question-level parsing and cache; native LPKT is untouched.
         at2idx, it2idx = generate_time2idx(data_config)
-        curvalid = LPKTDataset(os.path.join(data_config["dpath"], data_config["train_valid_file"]), at2idx, it2idx, data_config["input_type"], {i})
-        curtrain = LPKTDataset(os.path.join(data_config["dpath"], data_config["train_valid_file"]), at2idx, it2idx, data_config["input_type"], all_folds - {i})
+        curvalid = AKTLPKTQueDataset(os.path.join(data_config["dpath"], data_config["train_valid_file_quelevel"]), {i}, data_config["max_concepts"], at2idx, it2idx)
+        curtrain = AKTLPKTQueDataset(os.path.join(data_config["dpath"], data_config["train_valid_file_quelevel"]), all_folds - {i}, data_config["max_concepts"], at2idx, it2idx)
     elif model_name in ["rkt"] and dataset_name in ["statics2011", "assist2015", "poj"]:
         curvalid = KTDataset(os.path.join(data_config["dpath"], data_config["train_valid_file"]), data_config["input_type"], {i})
         curtrain = KTDataset(os.path.join(data_config["dpath"], data_config["train_valid_file"]), data_config["input_type"], all_folds - {i})

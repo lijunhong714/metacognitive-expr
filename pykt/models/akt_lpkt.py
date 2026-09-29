@@ -18,15 +18,17 @@
 ----------------
 构造::
 
-    AKTLPKT(num_c, num_q, num_at, num_it, num_phi, q_matrix=..., **model_config,
+    AKTLPKT(num_c, num_q, num_at, num_it, num_phi, input_level="question",
+            **model_config,
             emb_type=..., emb_path=...)
 
 前向::
 
     y, reg_loss = model(cc, cr, cq, itseqs, atseqs, phi, mask)
 
-``y`` 形状 (B, T)，与 AKT / LPKT 一致，由 ``model_forward`` 再切 ``[:,1:]``。
-``itseqs`` / ``atseqs`` 由 pykt 的 ``LPKTDataset`` 提供；``phi``（过程特征，如作答
+``cc`` 形状 (B,T,K)，``cq`` / ``cr`` 形状 (B,T)。``y`` 形状 (B,T)，
+每道题一个概率，由 ``model_forward`` 再切 ``[:,1:]``。
+``itseqs`` / ``atseqs`` 由 AKTLPKTQueDataset 提供；``phi``（过程特征，如作答
 时长、同题重试序数、提示次数、同概念间隔）需要自定义 dataloader，缺失时传 None。
 
 注册（各一行分支）：
@@ -222,7 +224,9 @@ class RecurrentRegulator(nn.Module):
         self.n_concept = n_concept
         self.d_k = d_k
         self.n_causes = n_causes
-        self.register_buffer("q_matrix", q_matrix.float())
+        # Question mode builds only the current batch's Q rows; never place a large
+        # [num_questions,num_concepts] matrix on the GPU.
+        self.register_buffer("q_matrix", None if q_matrix is None else q_matrix.float())
 
         self.it_embed = nn.Embedding(n_it + 1, d_k)
         self.at_embed = nn.Embedding(n_at + 1, d_k)
@@ -251,8 +255,9 @@ class RecurrentRegulator(nn.Module):
 
         self.forget_gate = nn.Linear(3 * d_k + 1, d_k)
 
-    def forward(self, inter_emb, q_rows, it_idx, at_idx, phi, rids, pid_diff, mask):
-        """q_rows: (B,T,n_c+1) 已由父模块按 q_matrix 查表展开的题目-概念指示矩阵。"""
+    def forward(self, inter_emb, q_rows, it_idx, at_idx, phi, rids, pid_diff, mask,
+                return_aux=False):
+        """q_rows: [B,T,n_c+1], built from the current question's KC set."""
         bs, seqlen, _ = inter_emb.shape
         nq = self.n_concept + 1
         if pid_diff is None:
@@ -260,7 +265,9 @@ class RecurrentRegulator(nn.Module):
             pid_diff = inter_emb.new_zeros(bs, seqlen, 1)
 
         it_emb = self.it_embed(it_idx)
-        at_emb = self.at_embed(at_idx) * torch.sigmoid(self.at_scale).view(1, 1, 1)
+        # None means this dataset has no answer-duration field, not duration bin 0.
+        at_emb = (torch.zeros_like(it_emb) if at_idx is None else
+                  self.at_embed(at_idx) * torch.sigmoid(self.at_scale).view(1, 1, 1))
         phi_emb = self.phi_proj(phi) if phi is not None else torch.zeros_like(at_emb)
 
         h = torch.zeros(bs, nq, self.d_k, device=inter_emb.device)
@@ -269,20 +276,27 @@ class RecurrentRegulator(nn.Module):
         omega_out = inter_emb.new_zeros(bs, seqlen)
         pi_out = inter_emb.new_zeros(bs, seqlen, self.n_causes)
         h_read_out = inter_emb.new_zeros(bs, seqlen, self.d_k)
+        # Optional scalar traces [B,T] or [B,T,C+1]; kept out of normal training.
+        traces = {key: [] for key in ("learning", "learning_gain", "gamma_l",
+                                     "delta_abs", "gamma_f", "h_concept")} if return_aux else None
 
         for t in range(seqlen):
             q_row = q_rows[:, t]                                       # (B,n_c+1)
             cnt = q_row.sum(dim=-1, keepdim=True).clamp_min(1.0)       # 数值安全
             h_tilde_pre = torch.bmm(q_row.unsqueeze(1), h).squeeze(1) / cnt
+            # ABLATION_POINT h^B: zero h_tilde_pre here and h after the update below.
             h_read_out[:, t] = h_tilde_pre
 
             learning = self.learning_norm(self.learning_cell(torch.cat(
                 [inter_emb[:, t], it_emb[:, t], at_emb[:, t], phi_emb[:, t]], dim=-1)))
             learning = self.dropout(learning)
+            # ABLATION_POINT learning: set learning = torch.zeros_like(learning) here.
 
             base = torch.cat([learning_pre, it_emb[:, t], learning, h_tilde_pre], dim=-1)
             gains = torch.stack([torch.tanh(op(base)) for op in self.cause_gain], dim=1)
+            # ABLATION_POINT gain: set gains = torch.zeros_like(gains) here.
             gates = torch.stack([torch.sigmoid(op(base)) for op in self.cause_gate], dim=1)
+            # ABLATION_POINT learning gate: set gates = torch.ones_like(gates) here.
             candidate = gates * ((gains + 1.0) / 2.0)                  # LPKT 的 (lg+1)/2 映射
 
             pi_in = torch.cat([
@@ -304,16 +318,29 @@ class RecurrentRegulator(nn.Module):
                 it_emb[:, t].unsqueeze(1).expand(-1, nq, -1),
                 omega.unsqueeze(1).expand(-1, nq, -1),
             ], dim=-1)))
+            # ABLATION_POINT forgetting: set gamma_f = torch.ones_like(gamma_f) here.
 
             # 把 delta 写到该题涉及的每个概念上：(B,n_c+1,1) @ (B,1,d_k) -> (B,n_c+1,d_k)
+            # ABLATION_POINT Q write: replace q_row only in this state-write operation.
             h_new = torch.bmm(q_row.unsqueeze(2), delta.unsqueeze(1)) + gamma_f * h
             step_mask = mask[:, t].float().view(bs, 1, 1)
             h = step_mask * h_new + (1.0 - step_mask) * h
+            if return_aux:
+                traces["learning"].append(learning.detach())            # [B,d_k]
+                traces["learning_gain"].append(gains.mean(-1).detach()) # [B,n_causes]
+                traces["gamma_l"].append(gates.mean(-1).detach())       # [B,n_causes]
+                traces["delta_abs"].append(delta.abs().mean(-1).detach())  # [B]
+                traces["gamma_f"].append(gamma_f.mean(-1).detach())    # [B,C+1]
+                # Post-response per-KC scalar state is for inspection, not prediction_t.
+                traces["h_concept"].append(h.square().mean(-1).sqrt().detach())
 
             omega_out[:, t] = omega.squeeze(-1) * mask[:, t].float()
             pi_out[:, t] = pi
             learning_pre = learning
 
+        if return_aux:
+            traces = {key: torch.stack(value, dim=1) for key, value in traces.items()}
+            return omega_out, pi_out, h_read_out, traces
         return omega_out, pi_out, h_read_out
 
 
@@ -330,7 +357,8 @@ class AKTLPKT(nn.Module):
     def __init__(self, n_question, n_pid, n_at, n_it, n_phi, d_model, n_blocks,
                  dropout, d_ff=256, kq_same=1, final_fc_dim=512, num_attn_heads=8,
                  separate_qa=False, l2=1e-5, n_causes=3, d_k=None, q_matrix=None,
-                 emb_type="qid", emb_path="", pretrain_dim=768, **kwargs):
+                 emb_type="qid", emb_path="", pretrain_dim=768,
+                 input_level="question", **kwargs):
         super().__init__()
         self.model_name = "akt_lpkt"
         self.n_question = n_question
@@ -343,22 +371,35 @@ class AKTLPKT(nn.Module):
         self.separate_qa = separate_qa
         self.emb_type = emb_type
         self.l2 = l2
+        self.input_level = input_level
+        if input_level not in ("question", "concept"):
+            raise ValueError(f"Unknown AKT_LPKT input_level: {input_level}")
+        if input_level == "question" and n_pid <= 0:
+            raise ValueError("Question-level AKT_LPKT requires question IDs (num_q > 0)")
 
         # 共享交互表示（AKT 的 base_emb）
-        self.q_embed = nn.Embedding(n_question, d_model)
+        # [B,T,K] KCs are fused without reading the current response; qa adds it only
+        # to the history/value stream, so response_t cannot influence prediction_t.
+        if input_level == "question":
+            self.q_embed = nn.Embedding(n_pid, d_model)
+            self.concept_embed = nn.Embedding(n_question + 1, d_model, padding_idx=n_question)
+        else:
+            self.q_embed = nn.Embedding(n_question, d_model)
         if separate_qa:
-            self.qa_embed = nn.Embedding(2 * n_question + 1, d_model)
+            qa_count = n_pid if input_level == "question" else n_question
+            self.qa_embed = nn.Embedding(2 * qa_count + 1, d_model)
         else:
             self.qa_embed = nn.Embedding(2, d_model)
         if n_pid > 0:
             self.difficult_param = nn.Embedding(n_pid + 1, 1)
-            self.q_embed_diff = nn.Embedding(n_question + 1, d_model)
-            self.qa_embed_diff = nn.Embedding(2 * n_question + 1, d_model)
+            diff_count = n_pid if input_level == "question" else n_question
+            self.q_embed_diff = nn.Embedding(diff_count + 1, d_model)
+            self.qa_embed_diff = nn.Embedding(2 * diff_count + 1, d_model)
 
         self.akt = AKTArchitecture(n_blocks, d_model, d_ff, num_attn_heads,
                                    dropout, kq_same == 1)
 
-        if q_matrix is None:
+        if q_matrix is None and input_level == "concept":
             q_matrix = torch.eye(n_question + 1)
         self.regulator = RecurrentRegulator(n_question, n_it, n_at, n_phi,
                                             d_model, self.d_k, n_causes,
@@ -374,30 +415,50 @@ class AKTLPKT(nn.Module):
 
     def reset(self):
         if self.n_pid > 0:
+            if self.input_level == "question":
+                # Zero-init difficulty only; keep its derivative embeddings trainable.
+                # Equal num_q/num_c must not zero the KC embeddings.
+                torch.nn.init.zeros_(self.difficult_param.weight)
+                return
             for p in self.parameters():
                 if p.dim() >= 1 and p.size(0) == self.n_pid + 1:
                     torch.nn.init.constant_(p, 0.0)
 
-    def base_emb(self, q_data, target):
+    def base_emb(self, q_data, target, concepts=None):
         q_embed_data = self.q_embed(q_data)
+        if self.input_level == "question":
+            valid = concepts.ge(0)
+            kc = self.concept_embed(concepts.clamp(min=0, max=self.n_question))
+            kc = (kc * valid.unsqueeze(-1)).sum(2) / valid.sum(2).clamp_min(1).unsqueeze(-1)
+            q_embed_data = q_embed_data + kc
         if self.separate_qa:
-            qa_embed_data = self.qa_embed(q_data + self.n_question * target)
+            qa_count = self.n_pid if self.input_level == "question" else self.n_question
+            qa_embed_data = self.qa_embed(q_data + qa_count * target)
+            if self.input_level == "question":
+                qa_embed_data = qa_embed_data + kc
         else:
             qa_embed_data = self.qa_embed(target) + q_embed_data
         return q_embed_data, qa_embed_data
 
     def forward(self, cids, rids, qids, itseqs=None, atseqs=None, phi=None,
                 mask=None, qtest=False, return_aux=False):
-        """cids=概念序列(cc)，rids=作答序列(cr)，qids=题目 id 序列(cq)。"""
-        bs, seqlen = cids.shape
-        q_embed_data, qa_embed_data = self.base_emb(cids, rids)
+        """Question mode: cids [B,T,K], rids/qids [B,T], one output per question."""
+        if self.input_level == "question":
+            if cids.ndim != 3 or qids is None:
+                raise ValueError("Question-level AKT_LPKT expects KCs [B,T,K] and question IDs [B,T]")
+            bs, seqlen = qids.shape
+            q_embed_data, qa_embed_data = self.base_emb(qids.clamp_min(0), rids.clamp_min(0), cids)
+        else:
+            bs, seqlen = cids.shape
+            q_embed_data, qa_embed_data = self.base_emb(cids, rids)
 
         pid_embed_data = None
         if self.n_pid > 0:
-            q_embed_diff_data = self.q_embed_diff(cids)
-            pid_embed_data = self.difficult_param(qids)
+            diff_ids = qids if self.input_level == "question" else cids
+            q_embed_diff_data = self.q_embed_diff(diff_ids.clamp_min(0))
+            pid_embed_data = self.difficult_param(qids.clamp_min(0))
             q_embed_data = q_embed_data + pid_embed_data * q_embed_diff_data
-            qa_embed_diff_data = self.qa_embed_diff(rids)
+            qa_embed_diff_data = self.qa_embed_diff(rids.clamp_min(0))
             if self.separate_qa:
                 qa_embed_data = qa_embed_data + pid_embed_data * qa_embed_diff_data
             else:
@@ -408,24 +469,31 @@ class AKTLPKT(nn.Module):
             c_reg_loss = torch.zeros((), device=cids.device)
 
         if mask is None:
-            mask = torch.ones_like(cids, dtype=torch.bool)
+            mask = torch.ones_like(rids, dtype=torch.bool)
         mask = mask.bool()
         if itseqs is None:
-            itseqs = torch.zeros_like(cids)
-        if atseqs is None:
-            atseqs = torch.zeros_like(cids)
+            itseqs = torch.zeros_like(rids)
         it_idx = itseqs.clamp(min=0, max=self.n_it)
-        at_idx = atseqs.clamp(min=0, max=self.n_at)
+        at_idx = None if atseqs is None else atseqs.clamp(min=0, max=self.n_at)
 
         # 通路 B 先跑：得到逐步的证据权重（因果，无循环依赖）
         # 概念级数据集（num_q == 0，如 assist2015）没有题目 id，cq 为空，退化用概念 id 充当题目索引。
         # 仅在模型本身没有题目维度时生效，有题目 id 的数据集一律走原路径
         if self.n_pid == 0 and (qids is None or qids.size(1) == 0):
             qids = cids
-        q_rows = self.regulator.q_matrix[qids]                          # (B,T,n_c+1)
+        if self.input_level == "question":
+            # Each question is one step. Scatter its KCs into one [B,T,C+1] Q row;
+            # the current response is used only in the subsequent state update.
+            valid_kc = cids.ge(0) & cids.lt(self.n_question)
+            q_rows = q_embed_data.new_zeros(bs, seqlen, self.n_question + 1)
+            q_rows.scatter_add_(2, cids.clamp(0, self.n_question), valid_kc.float())
+            q_rows.clamp_(max=1.0)
+        else:
+            q_rows = self.regulator.q_matrix[qids]                     # (B,T,n_c+1)
         q_rows = q_rows * mask.unsqueeze(-1).float()
-        omega, pi, h_read = self.regulator(qa_embed_data, q_rows, it_idx, at_idx,
-                                           phi, rids, pid_embed_data, mask)
+        reg_out = self.regulator(qa_embed_data, q_rows, it_idx, at_idx,
+                                 phi, rids, pid_embed_data, mask, return_aux=return_aux)
+        omega, pi, h_read = reg_out[:3]
 
         # 通路 A：知识检索器的 value 流被 omega 门控
         d_output = self.akt(q_embed_data, qa_embed_data, pid_embed_data,
@@ -435,7 +503,9 @@ class AKTLPKT(nn.Module):
         preds = torch.sigmoid(self.out(concat_q).squeeze(-1))
 
         if return_aux:
-            aux = {"omega": omega, "pi": pi, "h_read": h_read, "x_akt": d_output}
+            aux = {"omega": omega.detach(), "pi": pi.detach(),
+                   "h_read": h_read.detach(), "x_akt": d_output.detach(),
+                   **reg_out[3]}
             return preds, c_reg_loss, aux
         if qtest:
             return preds, c_reg_loss, concat_q
@@ -448,16 +518,12 @@ if __name__ == "__main__":
     num_c, num_q = 10, 20          # pykt 命名：num_c 概念数、num_q 题目数
     n_it, n_at, n_phi = 50, 50, 4
 
-    q_matrix = torch.zeros(num_q + 1, num_c + 1)
-    for q in range(num_q + 1):
-        q_matrix[q, q % num_c] = 1.0
-
     model = AKTLPKT(
         n_question=num_c, n_pid=num_q, n_at=n_at, n_it=n_it, n_phi=n_phi,
         d_model=32, n_blocks=1, dropout=0.1, d_ff=64, num_attn_heads=4,
-        n_causes=3, q_matrix=q_matrix, emb_type="qid",
+        n_causes=3, input_level="question", emb_type="qid",
     ).to(device)
-    cids = torch.randint(0, num_c, (B, T), device=device)
+    cids = torch.randint(0, num_c, (B, T, 2), device=device)
     qids = torch.randint(0, num_q, (B, T), device=device)
     rids = torch.randint(0, 2, (B, T), device=device)
     its = torch.randint(0, n_it, (B, T), device=device)

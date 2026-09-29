@@ -202,17 +202,17 @@ def model_forward(model, data, rel=None):
         # cat = torch.cat((d["at_seqs"][:,0:1], dshft["at_seqs"]), dim=1)
         cit = torch.cat((dcur["itseqs"][:,0:1], dcur["shft_itseqs"]), dim=1)
     elif model_name in ["akt_lpkt"]:
-        # akt_lpkt: AKT trunk + LPKT recurrent regulator
-        # itseqs: interval time index (provided by LPKTDataset), utseqs: answer duration index (requires the dataset to have a usetimes field)
+        # AKT_LPKT only: cc [B,T,K], cq/cr/cit [B,T]; one target per question.
+        # atseqs=None means the dataset has no duration field, so no duration embedding is read.
         cit = torch.cat((dcur["itseqs"][:,0:1], dcur["shft_itseqs"]), dim=1).to(device)
         if isinstance(dcur["utseqs"], torch.Tensor) and dcur["utseqs"].numel() > 0:
             cat = torch.cat((dcur["utseqs"][:,0:1], dcur["shft_utseqs"]), dim=1).to(device)
         else:
-            cat = torch.zeros_like(cit) # dataset has no usetimes -> all 0 indices, the model side uniformly maps to the 0th embedding
-        # interaction validity mask (B,T): prevent the recurrent regulator from updating the concept state h at padded steps
-        cmask = torch.cat((m[:, 0:1], m), dim=1)
-        # the process feature phi is not available in the pykt pipeline for now, pass None; reg_loss is the pid regularization term (same as AKT)
-        y, reg_loss = model(cc.long(), cr.long(), cq.long(), cit.long(), cat.long(), None, cmask)
+            cat = None
+        # Response_t can affect state_t+1 only; this mask suppresses padded updates.
+        cmask = cr.ne(-1)
+        y, reg_loss = model(cc.long(), cr.long(), cq.long(), cit.long(),
+                            None if cat is None else cat.long(), None, cmask)
         ys.append(y[:,1:])
         preloss.append(reg_loss)
     if model_name in ["dkt"]:
